@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/TheLearningHubOrg/learn-ollama/internal/metrics"
 	"github.com/TheLearningHubOrg/learn-ollama/internal/ollama"
 )
 
@@ -163,5 +164,67 @@ func TestEstimateEndpoint(t *testing.T) {
 	}
 	if code, _ := call(t, "GET", srv.URL+"/api/estimate?model=nope", ""); code != 400 {
 		t.Fatalf("unknown preset should be 400, got %d", code)
+	}
+}
+
+func TestTokenRequiredExceptHealth(t *testing.T) {
+	gw := &Server{Ollama: ollama.New("http://127.0.0.1:1"), Token: "s3cret"}
+	srv := httptest.NewServer(gw.Routes())
+	defer srv.Close()
+
+	if code, _ := call(t, "GET", srv.URL+"/health", ""); code != 200 {
+		t.Fatalf("/health must stay open, got %d", code)
+	}
+	if code, _ := call(t, "GET", srv.URL+"/api/estimate?model=llama3.1:8b", ""); code != 401 {
+		t.Fatalf("no token should be 401, got %d", code)
+	}
+	for token, want := range map[string]int{"wrong": 401, "s3cret": 200} {
+		req, _ := http.NewRequest("GET", srv.URL+"/api/estimate?model=llama3.1:8b", nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != want {
+			t.Errorf("token %q: status %d, want %d", token, resp.StatusCode, want)
+		}
+	}
+}
+
+func TestMetricsEndpoint(t *testing.T) {
+	upstream := http.NewServeMux()
+	upstream.HandleFunc("POST /api/chat", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"model":"llama3.2:3b","message":{"role":"assistant","content":"hi"},"done":true,
+			"prompt_eval_count":7,"eval_count":3,"eval_duration":1000000}`)
+	})
+	upstream.HandleFunc("GET /api/ps", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"models":[{"name":"llama3.2:3b","size":3000,"size_vram":3000,"expires_at":"2099-01-01T00:00:00Z"}]}`)
+	})
+	ollamaSrv := httptest.NewServer(upstream)
+	defer ollamaSrv.Close()
+
+	gw := &Server{Ollama: ollama.New(ollamaSrv.URL), DefaultModel: "llama3.2:3b", Metrics: metrics.New()}
+	srv := httptest.NewServer(gw.Routes())
+	defer srv.Close()
+	if code, body := call(t, "POST", srv.URL+"/api/ask", `{"prompt":"hello"}`); code != 200 {
+		t.Fatalf("ask = %d %v", code, body)
+	}
+	resp, err := http.Get(srv.URL + "/metrics")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(resp.Body)
+	text := string(raw)
+	for _, want := range []string{
+		`gateway_requests_total{route="POST /api/ask",status="200"} 1`,
+		`gateway_tokens_total{model="llama3.2:3b",kind="prompt"} 7`,
+		`ollama_up 1`,
+		`ollama_model_loaded_bytes{model="llama3.2:3b",location="vram"} 3000`,
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("missing %q in:\n%s", want, text)
+		}
 	}
 }

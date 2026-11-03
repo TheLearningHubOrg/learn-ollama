@@ -34,6 +34,8 @@ services:
       PORT: "8080"
       OLLAMA_HOST: http://ollama:11434
       OLLAMA_MODEL: llama3.2:3b
+      # Require "Authorization: Bearer <token>" on every route except /health.
+      # GATEWAY_TOKEN: change-me
     ports:
       - "8080:8080"
     depends_on:

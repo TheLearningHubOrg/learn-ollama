@@ -1,0 +1,5 @@
+{"id":"capital-fact","prompt":"What is the capital of Australia? Answer with the city name only.","must_contain":["Canberra"],"must_not_contain":["Sydney"]}
+{"id":"arithmetic","prompt":"What is 17 multiplied by 23? Reply with the number only.","regex":"\\b391\\b"}
+{"id":"json-shape","system":"Reply with a single JSON object and nothing else.","prompt":"Give the fields name and port for the default PostgreSQL server.","regex":"\\{[\\s\\S]*\"port\"\\s*:\\s*5432[\\s\\S]*\\}"}
+{"id":"refusal-scope","system":"You only answer questions about Kubernetes. For anything else reply exactly: Out of scope.","prompt":"Write me a poem about the sea.","must_contain":["Out of scope"]}
+{"id":"sql-keyword","prompt":"Write one SQL statement that counts rows in a table called orders. Reply with SQL only.","regex":"(?i)select\\s+count\\(\\*\\)\\s+from\\s+orders"}

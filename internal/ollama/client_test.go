@@ -154,3 +154,108 @@ func TestInBandStreamError(t *testing.T) {
 		t.Fatalf("expected in-band error, got %v", err)
 	}
 }
+
+func TestEmbedBatch(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req EmbedRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || r.URL.Path != "/api/embed" {
+			http.Error(w, `{"error":"bad request"}`, http.StatusBadRequest)
+			return
+		}
+		vecs := make([][]float32, len(req.Input))
+		for i := range req.Input {
+			vecs[i] = []float32{float32(i), 1}
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"model": req.Model, "embeddings": vecs})
+	}))
+	defer srv.Close()
+
+	out, err := New(srv.URL).Embed(context.Background(), EmbedRequest{Model: "nomic-embed-text", Input: []string{"a", "b", "c"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Embeddings) != 3 || out.Embeddings[2][0] != 2 {
+		t.Fatalf("Embed() = %+v", out)
+	}
+}
+
+func TestEmbedCountMismatchIsError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"embeddings":[[1,0]]}`)
+	}))
+	defer srv.Close()
+	_, err := New(srv.URL).Embed(context.Background(), EmbedRequest{Model: "m", Input: []string{"a", "b"}})
+	if err == nil || !strings.Contains(err.Error(), "asked for 2") {
+		t.Fatalf("expected count mismatch error, got %v", err)
+	}
+}
+
+func TestRunningReportsGPUFraction(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"models":[{"name":"llama3.1:8b","model":"llama3.1:8b","size":6000000000,
+			"size_vram":4500000000,"expires_at":"2026-11-03T10:00:00Z","context_length":8192}]}`)
+	}))
+	defer srv.Close()
+	models, err := New(srv.URL).Running(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(models) != 1 || models[0].ContextLength != 8192 {
+		t.Fatalf("Running() = %+v", models)
+	}
+	if got := models[0].GPUFraction(); math.Abs(got-0.75) > 1e-9 {
+		t.Fatalf("GPUFraction() = %v, want 0.75", got)
+	}
+}
+
+func TestPullStreamsProgress(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		for _, line := range []string{
+			`{"status":"pulling manifest"}`,
+			`{"status":"pulling 6a0746a1ec1a","digest":"sha256:6a0746a1ec1a","total":100,"completed":40}`,
+			`{"status":"pulling 6a0746a1ec1a","digest":"sha256:6a0746a1ec1a","total":100,"completed":100}`,
+			`{"status":"verifying sha256 digest"}`,
+			`{"status":"success"}`,
+		} {
+			fmt.Fprintln(w, line)
+		}
+	}))
+	defer srv.Close()
+	var completed []int64
+	err := New(srv.URL).Pull(context.Background(), "llama3.2:3b", func(p PullProgress) error {
+		if p.Total > 0 {
+			completed = append(completed, p.Completed)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(completed) != 2 || completed[1] != 100 {
+		t.Fatalf("progress = %v", completed)
+	}
+}
+
+func TestPullWithoutSuccessIsError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintln(w, `{"status":"pulling manifest"}`)
+	}))
+	defer srv.Close()
+	if err := New(srv.URL).Pull(context.Background(), "x", nil); err == nil {
+		t.Fatal("expected an error when the stream ends before success")
+	}
+}
+
+func TestToolCallArgumentsRoundTrip(t *testing.T) {
+	raw := `{"role":"assistant","content":"","tool_calls":[{"function":{"name":"get_order_status","arguments":{"id":42}}}]}`
+	var m Message
+	if err := json.Unmarshal([]byte(raw), &m); err != nil {
+		t.Fatal(err)
+	}
+	var args struct {
+		ID int `json:"id"`
+	}
+	if err := json.Unmarshal(m.ToolCalls[0].Function.Arguments, &args); err != nil || args.ID != 42 {
+		t.Fatalf("arguments = %s, %v", m.ToolCalls[0].Function.Arguments, err)
+	}
+}

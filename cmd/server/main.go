@@ -4,6 +4,7 @@
 //	PORT          port to listen on (default 8080)
 //	OLLAMA_HOST   where Ollama listens (default http://127.0.0.1:11434)
 //	OLLAMA_MODEL  model used when a request names none (default llama3.2:3b)
+//	GATEWAY_TOKEN bearer token required on every route except /health (unset: no auth)
 package main
 
 import (
@@ -16,6 +17,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/TheLearningHubOrg/learn-ollama/internal/metrics"
 	"github.com/TheLearningHubOrg/learn-ollama/internal/ollama"
 	"github.com/TheLearningHubOrg/learn-ollama/internal/server"
 )
@@ -27,6 +29,11 @@ func main() {
 	srv := &server.Server{
 		Ollama:       ollama.New(host),
 		DefaultModel: envOr("OLLAMA_MODEL", "llama3.2:3b"),
+		Metrics:      metrics.New(),
+		Token:        os.Getenv("GATEWAY_TOKEN"),
+	}
+	if srv.Token == "" {
+		log.Print("GATEWAY_TOKEN is not set: the gateway accepts unauthenticated requests")
 	}
 
 	// Bind 0.0.0.0 so the port is reachable from outside a container.

@@ -4,6 +4,7 @@
 package server
 
 import (
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"io"
@@ -12,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/TheLearningHubOrg/learn-ollama/internal/metrics"
 	"github.com/TheLearningHubOrg/learn-ollama/internal/modelfile"
 	"github.com/TheLearningHubOrg/learn-ollama/internal/ollama"
 	"github.com/TheLearningHubOrg/learn-ollama/internal/sizing"
@@ -19,21 +21,68 @@ import (
 
 const maxBody = 1 << 20 // 1 MiB
 
-// Server holds the gateway's dependencies.
+// Server holds the gateway's dependencies. Metrics and Token are optional:
+// with Metrics set the gateway serves GET /metrics, and with Token set every
+// route except /health needs "Authorization: Bearer <Token>".
 type Server struct {
 	Ollama       *ollama.Client
 	DefaultModel string
+	Metrics      *metrics.Registry
+	Token        string
 }
 
 // Routes returns the HTTP handler. Method-qualified patterns need Go 1.22+.
 func (s *Server) Routes() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /health", s.health)
-	mux.HandleFunc("GET /api/models", s.models)
-	mux.HandleFunc("POST /api/ask", s.ask)
-	mux.HandleFunc("POST /api/modelfile/lint", s.lint)
-	mux.HandleFunc("GET /api/estimate", s.estimate)
-	return mux
+	handle := func(pattern string, h http.HandlerFunc) {
+		if s.Metrics != nil {
+			h = s.Metrics.Wrap(pattern, h)
+		}
+		mux.HandleFunc(pattern, h)
+	}
+	handle("GET /health", s.health)
+	handle("GET /api/models", s.models)
+	handle("POST /api/ask", s.ask)
+	handle("POST /api/modelfile/lint", s.lint)
+	handle("GET /api/estimate", s.estimate)
+	if s.Metrics != nil {
+		mux.HandleFunc("GET /metrics", s.metrics)
+	}
+	if s.Token == "" {
+		return mux
+	}
+	return RequireToken(s.Token, mux, "/health")
+}
+
+// RequireToken rejects requests without "Authorization: Bearer <token>".
+// Paths listed in open stay reachable so probes keep working. The comparison
+// runs in constant time so response timing does not leak the token.
+func RequireToken(token string, next http.Handler, open ...string) http.Handler {
+	want := []byte(token)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		for _, p := range open {
+			if r.URL.Path == p {
+				next.ServeHTTP(w, r)
+				return
+			}
+		}
+		got, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
+		if !ok || subtle.ConstantTimeCompare([]byte(got), want) != 1 {
+			w.Header().Set("WWW-Authenticate", `Bearer realm="learn-ollama"`)
+			writeError(w, http.StatusUnauthorized, "missing or invalid bearer token")
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// metrics renders Prometheus text. It polls /api/ps on every scrape so the
+// loaded-model gauges are current; a failed poll sets ollama_up to 0 instead
+// of failing the scrape.
+func (s *Server) metrics(w http.ResponseWriter, r *http.Request) {
+	running, err := s.Ollama.Running(r.Context())
+	w.Header().Set("Content-Type", "text/plain; version=0.0.4")
+	s.Metrics.Write(w, running, err == nil)
 }
 
 // health answers without calling Ollama, so a container orchestrator can
@@ -123,6 +172,9 @@ func (s *Server) ask(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeUpstreamError(w, err)
 		return
+	}
+	if s.Metrics != nil {
+		s.Metrics.AddTokens(resp.Model, resp.PromptEvalCount, resp.EvalCount)
 	}
 	writeJSON(w, http.StatusOK, askResponse{
 		Model:            resp.Model,
