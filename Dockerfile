@@ -1,31 +1,20 @@
-# Stage 1: Build & Dependencies
-FROM python:3.12-slim AS builder
+# learn-ollama gateway: a Go service compiled to a static binary on a
+# distroless base. Ollama itself runs in its own container (see compose.yaml).
 
-WORKDIR /app
-
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
-    && rm -rf /var/lib/apt/lists/*
-
-COPY pyproject.toml requirements.txt ./
-RUN pip install --no-cache-dir --user -r requirements.txt
-
-# Stage 2: Runtime
-FROM python:3.12-slim AS runner
-
-WORKDIR /app
-
-RUN groupadd -g 1001 appgroup && \
-    useradd -u 1001 -g appgroup -s /bin/bash -m appuser
-
-COPY --from=builder /root/.local /home/appuser/.local
-ENV PATH=/home/appuser/.local/bin:$PATH
-
+# ---- build ------------------------------------------------------------------
+FROM golang:1.26-alpine AS build
+WORKDIR /src
+# Manifests first so the module layer is cached between source edits.
+COPY go.mod go.sum* ./
+RUN go mod download
 COPY . .
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/app ./cmd/server
 
-RUN chown -R appuser:appgroup /app
-USER appuser
-
-ENV PYTHONUNBUFFERED=1
-
-CMD ["python", "-m", "src.learn_ollama.main"]
+# ---- runtime: no shell, no package manager, runs as uid 65532 ---------------
+FROM gcr.io/distroless/static-debian12:nonroot AS runtime
+COPY --from=build /out/app /app
+ENV PORT=8080 \
+    OLLAMA_HOST=http://ollama:11434
+EXPOSE 8080
+USER nonroot:nonroot
+ENTRYPOINT ["/app"]

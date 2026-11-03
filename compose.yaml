@@ -1,0 +1,44 @@
+# Ollama plus the learn-ollama gateway.
+#   docker compose up -d --build
+#   docker compose exec ollama ollama pull llama3.2:3b
+#   curl -s localhost:8080/api/ask -d '{"prompt":"Say hi in five words"}'
+services:
+  ollama:
+    image: ollama/ollama:latest
+    environment:
+      OLLAMA_HOST: 0.0.0.0:11434
+      OLLAMA_KEEP_ALIVE: 30m
+    volumes:
+      - ollama-models:/root/.ollama
+    # Only the gateway talks to Ollama; publish 11434 only for local debugging.
+    expose:
+      - "11434"
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    # Uncomment on a host with the NVIDIA Container Toolkit installed.
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
+
+  gateway:
+    build: .
+    environment:
+      PORT: "8080"
+      OLLAMA_HOST: http://ollama:11434
+      OLLAMA_MODEL: llama3.2:3b
+    ports:
+      - "8080:8080"
+    depends_on:
+      ollama:
+        condition: service_healthy
+
+volumes:
+  ollama-models:

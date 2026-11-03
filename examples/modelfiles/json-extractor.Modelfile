@@ -1,0 +1,17 @@
+# A deterministic extractor. Pair it with the "format" field of /api/chat,
+# which constrains decoding to a JSON schema; the prompt alone cannot
+# guarantee valid JSON.
+# Build:  ollama create json-extractor -f examples/modelfiles/json-extractor.Modelfile
+FROM llama3.2:3b
+
+PARAMETER temperature 0
+PARAMETER seed 42
+PARAMETER num_ctx 4096
+# Cap output so a runaway answer cannot fill the context window.
+PARAMETER num_predict 512
+
+SYSTEM """
+You extract structured data from text.
+Reply with one JSON object that matches the schema the caller supplies.
+Use null for fields the text does not mention. Never invent values.
+"""
